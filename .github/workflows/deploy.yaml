@@ -1,0 +1,63 @@
+name: Deploy app
+on:
+  push:
+    branches:
+      - main
+
+env:
+  SHA: $(git rev-parse HEAD)
+  AWS_REGION: eu-central-1
+  EKS_CLUSTER_NAME: adorable-rock-shark
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Test
+        run: |-
+          docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
+          docker build -t marekstasik5/react-test -f ./client/Dockerfile.dev ./client
+          docker run -e CI=true marekstasik5/react-test npm test
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: latest
+
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --region $AWS_REGION \
+            --name $EKS_CLUSTER_NAME
+
+      - name: Build
+        run: |-
+          docker build -t marekstasik5/multi-client:latest -t marekstasik5/multi-client:${{ env.SHA }} -f ./client/Dockerfile ./client
+          docker build -t marekstasik5/multi-server:latest -t marekstasik5/multi-server:${{ env.SHA }} -f ./server/Dockerfile ./server
+          docker build -t marekstasik5/multi-worker:latest -t marekstasik5/multi-worker:${{ env.SHA }} -f ./worker/Dockerfile ./worker
+
+      - name: Push
+        run: |-
+          docker push marekstasik5/multi-client:latest
+          docker push marekstasik5/multi-server:latest
+          docker push marekstasik5/multi-worker:latest
+
+          docker push marekstasik5/multi-client:${{ env.SHA }}
+          docker push marekstasik5/multi-server:${{ env.SHA }}
+          docker push marekstasik5/multi-worker:${{ env.SHA }}
+
+      - name: Apply
+        run: |-
+          kubectl apply -f k8s
+          kubectl set image deployments/server-deployment server=marekstasik5/multi-server:${{ env.SHA }}
+          kubectl set image deployments/client-deployment client=marekstasik5/multi-client:${{ env.SHA }}
+          kubectl set image deployments/worker-deployment worker=marekstasik5/multi-worker:${{ env.SHA }}
